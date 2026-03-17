@@ -12,6 +12,7 @@ type PlatformFetchResult = {
   platform: string;
   items: DeadlineItem[];
   expired: boolean;
+  fetched: boolean;
 };
 
 export type DeadlineItem = {
@@ -54,7 +55,7 @@ async function fetchPlatformDeadlines(platform: string, fields: Fields | Session
   const required = PLATFORM_REQUIRED_FIELDS[platform] || [];
 
   if (!api) {
-    return { platform, items: [], expired: false };
+    return { platform, items: [], expired: false, fetched: false };
   }
 
   let payload: Record<string, unknown> = {};
@@ -63,41 +64,46 @@ async function fetchPlatformDeadlines(platform: string, fields: Fields | Session
     if (platform === "Hydro") {
       const url = (fields as SessionData).url;
       if (!url) {
-        return { platform, items: [], expired: false };
+        return { platform, items: [], expired: false, fetched: false };
       }
       payload.url = url;
     }
   } else {
     if (!hasRequiredFields(fields as Fields, required)) {
-      return { platform, items: [], expired: false };
+      return { platform, items: [], expired: false, fetched: false };
     }
     payload = fields as Fields;
   }
 
   const baseUrl = getPythonBaseUrl();
-  const response = await fetch(`${baseUrl}${api}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}${api}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  } catch {
+    return { platform, items: [], expired: false, fetched: false };
+  }
 
   if (!response.ok) {
-    return { platform, items: [], expired: false };
+    return { platform, items: [], expired: false, fetched: false };
   }
 
   const result = await response.json();
   if (result?.status === "session_expired") {
-    return { platform, items: [], expired: true };
+    return { platform, items: [], expired: true, fetched: false };
   }
   if (result?.status !== "success" || !Array.isArray(result.data)) {
-    return { platform, items: [], expired: false };
+    return { platform, items: [], expired: false, fetched: false };
   }
 
   const items = result.data.map((item: DeadlineItem) => ({
     ...item,
     platform,
   }));
-  return { platform, items, expired: false };
+  return { platform, items, expired: false, fetched: true };
 }
 
 export type RefreshResult = {
@@ -147,7 +153,9 @@ export async function refreshUserDeadlinesDetailed(userId: string): Promise<Refr
     .filter((result) => result.expired)
     .map((result) => result.platform);
 
-  const items = results
+  const successfulResults = results.filter((result) => result.fetched);
+
+  const items = successfulResults
     .flatMap((result) => result.items)
     .filter((item) => item && item.title && item.due)
     .filter((item) => {
@@ -161,15 +169,26 @@ export async function refreshUserDeadlinesDetailed(userId: string): Promise<Refr
   try {
     await client.query("begin");
     for (const result of results) {
+      if (result.expired) {
+        await client.query(
+          "update platform_sessions set session_valid = false, session_checked_at = now() where user_id = $1 and platform = $2",
+          [userId, result.platform]
+        );
+      } else if (result.fetched) {
+        await client.query(
+          "update platform_sessions set session_valid = true, session_checked_at = now() where user_id = $1 and platform = $2",
+          [userId, result.platform]
+        );
+      }
+    }
+
+    const successfulPlatforms = successfulResults.map((result) => result.platform);
+    if (successfulPlatforms.length > 0) {
       await client.query(
-        "update platform_sessions set session_valid = $1, session_checked_at = now() where user_id = $2 and platform = $3",
-        [!result.expired, userId, result.platform]
+        "delete from deadlines where user_id = $1 and platform = any($2::text[])",
+        [userId, successfulPlatforms]
       );
     }
-    await client.query(
-      "delete from deadlines where user_id = $1 and platform <> 'manual'",
-      [userId]
-    );
 
     for (const item of items) {
       await client.query(
