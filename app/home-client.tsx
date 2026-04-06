@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Checkbox } from '@/components/ui/checkbox'
 import { toast } from 'sonner'
 import { Toaster } from '@/components/ui/sonner'
 import { ChevronDown, ChevronUp, Loader2 } from 'lucide-react'
@@ -934,14 +935,12 @@ function DeadlineCard({ item, isPast = false, onViewDetails, onEdit, onToggleCom
       <div className="space-y-1">
         <div className="flex items-start justify-between gap-2">
           <div className="flex items-start gap-2 flex-1 min-w-0">
-            <button
-              type="button"
+            <Checkbox
               aria-label={isCompleted ? '标记为未完成' : '标记为已完成'}
-              onClick={() => onToggleCompleted?.(item, !isCompleted)}
-              className={`mt-1 flex h-5 w-5 items-center justify-center rounded border ${isCompleted ? 'border-green-600 bg-green-600 text-white' : 'border-slate-400 bg-white text-transparent dark:bg-slate-900'}`}
-            >
-              ✓
-            </button>
+              checked={isCompleted}
+              onChange={(e) => onToggleCompleted?.(item, e.currentTarget.checked)}
+              className="mt-1"
+            />
             <h3 className={`font-semibold text-lg leading-tight break-words ${isCompleted ? 'line-through text-slate-500 dark:text-slate-400' : ''}`}>{item.title}</h3>
           </div>
           {!isPast && (
