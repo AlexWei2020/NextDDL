@@ -201,7 +201,7 @@ export async function refreshUserDeadlinesDetailed(userId: string): Promise<Refr
     }
 
     for (const item of items) {
-      const completed = Boolean(item.completed) || /submitted/i.test(item.status ?? "")
+      const completed = Boolean(item.completed) || (item.status ?? "").trim().toLowerCase() === "submitted"
       await client.query(
         `
         insert into deadlines (user_id, platform, title, course, due_at, status, completed, url)

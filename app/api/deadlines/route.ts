@@ -29,7 +29,7 @@ export async function GET() {
 
   const items = result.rows.map((row) => {
     const due = Math.floor(new Date(row.due_at).getTime() / 1000)
-    const submitted = row.status ? !/no submission/i.test(row.status) : false
+    const submitted = typeof row.status === 'string' && row.status.trim().toLowerCase() === 'submitted'
     const completed = Boolean(row.completed) || submitted
     return {
       id: row.id,

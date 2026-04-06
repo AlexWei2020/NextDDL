@@ -916,7 +916,7 @@ interface DeadlineCardProps {
 function DeadlineCard({ item, isPast = false, onViewDetails, onEdit, onToggleCompleted }: DeadlineCardProps) {
   const dueDate = new Date(Number(item.due) * 1000)
   const isOverdue = item.due < Date.now() / 1000
-  const isCompleted = Boolean(item.completed) || /submitted/i.test(item.status ?? '')
+  const isCompleted = Boolean(item.completed)
   const now = Date.now()
   const timeUntilDue = item.due * 1000 - now
   const daysUntil = Math.floor(timeUntilDue / (1000 * 60 * 60 * 24))
