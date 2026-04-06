@@ -10,6 +10,7 @@ type DeadlineItem = {
   status?: string
   url: string
   submitted?: boolean
+  completed?: boolean
 }
 
 export async function GET() {
@@ -18,7 +19,7 @@ export async function GET() {
 
   const result = await pool.query(
     `
-    select id, platform, title, course, due_at, status, url
+    select id, platform, title, course, due_at, status, completed, url
     from deadlines
     where user_id = $1
     order by due_at asc
@@ -29,6 +30,7 @@ export async function GET() {
   const items = result.rows.map((row) => {
     const due = Math.floor(new Date(row.due_at).getTime() / 1000)
     const submitted = row.status ? !/no submission/i.test(row.status) : false
+    const completed = Boolean(row.completed) || submitted
     return {
       id: row.id,
       platform: row.platform,
@@ -36,6 +38,7 @@ export async function GET() {
       course: row.course,
       due,
       status: row.status,
+      completed,
       url: row.url,
       submitted,
     }
@@ -59,8 +62,8 @@ export async function POST(request: Request) {
     for (const item of items) {
       await client.query(
         `
-        insert into deadlines (user_id, platform, title, course, due_at, status, url)
-        values ($1, $2, $3, $4, to_timestamp($5), $6, $7)
+        insert into deadlines (user_id, platform, title, course, due_at, status, completed, url)
+        values ($1, $2, $3, $4, to_timestamp($5), $6, $7, $8)
         `,
         [
           user.id,
@@ -69,6 +72,7 @@ export async function POST(request: Request) {
           item.course,
           item.due,
           item.status ?? null,
+          Boolean(item.completed),
           item.url,
         ]
       )

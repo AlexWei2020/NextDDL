@@ -71,11 +71,14 @@ interface DeadlineItem {
   status?: string
   url?: string
   submitted?: boolean
+  completed?: boolean
 }
 
 interface HomeClientProps {
   user: User
 }
+
+type AccountStatus = 'session_valid' | 'session_expired' | 'credentials_configured' | 'not_configured' | 'unknown'
 
 export default function HomeClient({ user }: HomeClientProps) {
   const router = useRouter()
@@ -88,7 +91,7 @@ export default function HomeClient({ user }: HomeClientProps) {
   const [showAddManual, setShowAddManual] = useState(false)
   const [manualSaving, setManualSaving] = useState(false)
   const [showIcsOptions, setShowIcsOptions] = useState(false)
-  const [sessionStatus, setSessionStatus] = useState<Record<string, 'valid' | 'expired' | 'unknown'>>({})
+  const [accountStatus, setAccountStatus] = useState<Record<string, AccountStatus>>({})
   const [manualForm, setManualForm] = useState({
     title: '',
     course: '',
@@ -120,17 +123,11 @@ export default function HomeClient({ user }: HomeClientProps) {
         }
         if (statusRes.ok) {
           const statusData = await statusRes.json()
-          const nextStatus: Record<string, 'valid' | 'expired' | 'unknown'> = {}
+          const nextStatus: Record<string, AccountStatus> = {}
           for (const item of statusData.items ?? []) {
-            if (item.sessionValid === true) {
-              nextStatus[item.platform] = 'valid'
-            } else if (item.sessionValid === false) {
-              nextStatus[item.platform] = 'expired'
-            } else {
-              nextStatus[item.platform] = 'unknown'
-            }
+            nextStatus[item.platform] = item.accountStatus ?? 'unknown'
           }
-          setSessionStatus(nextStatus)
+          setAccountStatus(nextStatus)
         }
       } catch (error) {
         console.error(error)
@@ -156,17 +153,11 @@ export default function HomeClient({ user }: HomeClientProps) {
       const statusRes = await fetch('/api/platform-session-status')
       if (statusRes.ok) {
         const statusData = await statusRes.json()
-        const nextStatus: Record<string, 'valid' | 'expired' | 'unknown'> = {}
+        const nextStatus: Record<string, AccountStatus> = {}
         for (const item of statusData.items ?? []) {
-          if (item.sessionValid === true) {
-            nextStatus[item.platform] = 'valid'
-          } else if (item.sessionValid === false) {
-            nextStatus[item.platform] = 'expired'
-          } else {
-            nextStatus[item.platform] = 'unknown'
-          }
+          nextStatus[item.platform] = item.accountStatus ?? 'unknown'
         }
-        setSessionStatus(nextStatus)
+        setAccountStatus(nextStatus)
       }
       toast.success('DDL已刷新')
     } catch (error) {
@@ -235,6 +226,29 @@ export default function HomeClient({ user }: HomeClientProps) {
 
   const handleManualFieldChange = (field: keyof typeof manualForm, value: string) => {
     setManualForm((prev) => ({ ...prev, [field]: value }))
+  }
+
+  const handleToggleCompleted = async (item: DeadlineItem, completed: boolean) => {
+    if (!item.id) {
+      toast.error('记录ID缺失')
+      return
+    }
+
+    setData((prev) => prev.map((d) => d.id === item.id ? { ...d, completed } : d))
+    try {
+      const res = await fetch(`/api/deadlines/${item.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ completed })
+      })
+      if (!res.ok) {
+        throw new Error('Failed to update completed status')
+      }
+    } catch (error) {
+      console.error(error)
+      setData((prev) => prev.map((d) => d.id === item.id ? { ...d, completed: !completed } : d))
+      toast.error('更新完成状态失败')
+    }
   }
 
   const handleEditFieldChange = (field: keyof typeof editForm, value: string) => {
@@ -574,6 +588,7 @@ export default function HomeClient({ user }: HomeClientProps) {
                           isPast
                           onViewDetails={setDetailItem}
                           onEdit={openEdit}
+                          onToggleCompleted={handleToggleCompleted}
                         />
                       ))}
                     </div>
@@ -608,6 +623,7 @@ export default function HomeClient({ user }: HomeClientProps) {
                         item={item}
                         onViewDetails={setDetailItem}
                         onEdit={openEdit}
+                        onToggleCompleted={handleToggleCompleted}
                       />
                     ))}
                   </div>
@@ -684,22 +700,26 @@ export default function HomeClient({ user }: HomeClientProps) {
 
               <Card>
                 <CardHeader>
-                  <CardTitle>Session状态</CardTitle>
-                  <CardDescription>仅在重新获取DDL时检测</CardDescription>
+                    <CardTitle>账号状态</CardTitle>
+                    <CardDescription>若配置Session 其状态仅在重新获取DDL时检测</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-3 text-sm">
                   {APIList.map((platform) => {
-                    const status = sessionStatus[platform.name] ?? 'unknown'
-                    const dotClass = status === 'valid'
-                      ? 'bg-green-500'
-                      : status === 'expired'
-                        ? 'bg-red-500'
-                        : 'bg-slate-300'
-                    const text = status === 'valid'
-                      ? '有效'
-                      : status === 'expired'
-                        ? '过期，需重新配置'
-                        : '未知'
+                      const status = accountStatus[platform.name] ?? 'not_configured'
+                      const dotClass = status === 'session_valid' || status === 'credentials_configured'
+                        ? 'bg-green-500'
+                        : status === 'session_expired'
+                          ? 'bg-red-500'
+                          : 'bg-slate-300'
+                      const text = status === 'session_valid'
+                        ? 'Session 有效'
+                        : status === 'session_expired'
+                          ? 'Session 过期，需重新配置'
+                          : status === 'credentials_configured'
+                            ? '已配置账号密码'
+                            : status === 'not_configured'
+                              ? '未配置'
+                              : '未知'
                     return (
                       <div key={platform.name} className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
@@ -742,8 +762,9 @@ export default function HomeClient({ user }: HomeClientProps) {
                     <div>
                       <h3 className="font-semibold text-slate-800 dark:text-slate-200">Next DDL如何保证您的数据安全...</h3>
                       <ul className="list-disc pl-5 mt-2 space-y-1">
-                        <li>本网站仅保存您在不同平台的会话信息（session），通过session获取DDL，不保存明文账号密码</li>
-                        <li>Session数据均使用 AES-256-GCM 加密后存储</li>
+                          <li>平台凭据可按配置方式保存为 Session 或账号密码，敏感数据不会明文存储</li>
+                          <li>账号密码模式使用 RSA 公钥 + AES-256-GCM 封装后入库，私钥仅存于服务端敏感环境变量</li>
+                          <li>用户标识会在加盐哈希后作为键进行存储映射，无法直接反查原始用户 ID</li>
                       </ul>
                     </div>
                   </CardContent>
@@ -888,11 +909,13 @@ interface DeadlineCardProps {
   isPast?: boolean
   onViewDetails?: (item: DeadlineItem) => void
   onEdit?: (item: DeadlineItem) => void
+  onToggleCompleted?: (item: DeadlineItem, completed: boolean) => void
 }
 
-function DeadlineCard({ item, isPast = false, onViewDetails, onEdit }: DeadlineCardProps) {
+function DeadlineCard({ item, isPast = false, onViewDetails, onEdit, onToggleCompleted }: DeadlineCardProps) {
   const dueDate = new Date(Number(item.due) * 1000)
   const isOverdue = item.due < Date.now() / 1000
+  const isCompleted = Boolean(item.completed) || /submitted/i.test(item.status ?? '')
   const now = Date.now()
   const timeUntilDue = item.due * 1000 - now
   const daysUntil = Math.floor(timeUntilDue / (1000 * 60 * 60 * 24))
@@ -901,32 +924,44 @@ function DeadlineCard({ item, isPast = false, onViewDetails, onEdit }: DeadlineC
   const formattedDue = `${dueDate.getFullYear()}/${pad(dueDate.getMonth() + 1)}/${pad(dueDate.getDate())} ${pad(dueDate.getHours())}:${pad(dueDate.getMinutes())}`
 
   return (
-    <div className={`relative pl-8 pb-4 ${!isPast && 'border-l-2 border-blue-200 dark:border-blue-800'}`}>
+    <div className={`relative pl-8 pb-4 ${!isPast && 'border-l-2 border-blue-200 dark:border-blue-800'} ${isCompleted ? 'opacity-60' : ''}`}>
       {/* Timeline Dot */}
       <div className={`absolute left-0 top-0 -translate-x-1/2 w-4 h-4 rounded-full ${
-        isOverdue ? 'bg-slate-400' : isPast ? 'bg-slate-300' : 'bg-blue-500'
+        isCompleted ? 'bg-green-500' : isOverdue ? 'bg-slate-400' : isPast ? 'bg-slate-300' : 'bg-blue-500'
       } ring-4 ring-white dark:ring-slate-950`} />
 
       {/* Content */}
       <div className="space-y-1">
         <div className="flex items-start justify-between gap-2">
-          <h3 className="font-semibold text-lg leading-tight break-words">{item.title}</h3>
+          <div className="flex items-start gap-2 flex-1 min-w-0">
+            <button
+              type="button"
+              aria-label={isCompleted ? '标记为未完成' : '标记为已完成'}
+              onClick={() => onToggleCompleted?.(item, !isCompleted)}
+              className={`mt-1 flex h-5 w-5 items-center justify-center rounded border ${isCompleted ? 'border-green-600 bg-green-600 text-white' : 'border-slate-400 bg-white text-transparent dark:bg-slate-900'}`}
+            >
+              ✓
+            </button>
+            <h3 className={`font-semibold text-lg leading-tight break-words ${isCompleted ? 'line-through text-slate-500 dark:text-slate-400' : ''}`}>{item.title}</h3>
+          </div>
           {!isPast && (
             <div className={`text-xs px-2 py-1 rounded-full whitespace-nowrap ${
-              isOverdue
+              isCompleted
+                ? 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300'
+                : isOverdue
                 ? 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300'
                 : daysUntil === 0
                   ? 'bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300'
                   : 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300'
             }`}>
-              {isOverdue ? '已过期' : daysUntil === 0 ? `${hoursUntil}小时` : `${daysUntil}天`}
+              {isCompleted ? '已完成' : isOverdue ? '已过期' : daysUntil === 0 ? `${hoursUntil}小时` : `${daysUntil}天`}
             </div>
           )}
         </div>
 
-        <p className="text-sm text-slate-600 dark:text-slate-400">{item.course}</p>
+        <p className={`text-sm text-slate-600 dark:text-slate-400 ${isCompleted ? 'line-through' : ''}`}>{item.course}</p>
 
-        <div className="flex items-center gap-3 text-xs text-slate-500 dark:text-slate-500">
+        <div className={`flex items-center gap-3 text-xs text-slate-500 dark:text-slate-500 ${isCompleted ? 'line-through' : ''}`}>
           <time dateTime={dueDate.toISOString()}>
             {formattedDue}
           </time>

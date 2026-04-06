@@ -1,15 +1,18 @@
 import "server-only";
 import { pool } from "@/lib/db";
-import { decryptJson } from "@/lib/crypto";
+import { decryptStoredPlatformDataForUser } from "@/lib/credential-vault";
 
 type Fields = Record<string, string>;
+type AuthMode = "session" | "credentials";
 type SessionData = {
+  authMode?: AuthMode;
   cookies?: Record<string, string>;
   url?: string;
 } & Record<string, unknown>;
 
 type PlatformFetchResult = {
   platform: string;
+  authMode: AuthMode;
   items: DeadlineItem[];
   expired: boolean;
   fetched: boolean;
@@ -23,6 +26,7 @@ export type DeadlineItem = {
   status?: string;
   url: string;
   submitted?: boolean;
+  completed?: boolean;
 };
 
 const PLATFORM_API: Record<string, string> = {
@@ -53,9 +57,10 @@ function hasRequiredFields(fields: Fields, required: string[]) {
 async function fetchPlatformDeadlines(platform: string, fields: Fields | SessionData): Promise<PlatformFetchResult> {
   const api = PLATFORM_API[platform];
   const required = PLATFORM_REQUIRED_FIELDS[platform] || [];
+  const authMode: AuthMode = (fields as SessionData).authMode === "credentials" ? "credentials" : "session";
 
   if (!api) {
-    return { platform, items: [], expired: false, fetched: false };
+    return { platform, authMode, items: [], expired: false, fetched: false };
   }
 
   let payload: Record<string, unknown> = {};
@@ -64,13 +69,13 @@ async function fetchPlatformDeadlines(platform: string, fields: Fields | Session
     if (platform === "Hydro") {
       const url = (fields as SessionData).url;
       if (!url) {
-        return { platform, items: [], expired: false, fetched: false };
+        return { platform, authMode, items: [], expired: false, fetched: false };
       }
       payload.url = url;
     }
   } else {
     if (!hasRequiredFields(fields as Fields, required)) {
-      return { platform, items: [], expired: false, fetched: false };
+      return { platform, authMode, items: [], expired: false, fetched: false };
     }
     payload = fields as Fields;
   }
@@ -84,26 +89,26 @@ async function fetchPlatformDeadlines(platform: string, fields: Fields | Session
       body: JSON.stringify(payload),
     });
   } catch {
-    return { platform, items: [], expired: false, fetched: false };
+    return { platform, authMode, items: [], expired: false, fetched: false };
   }
 
   if (!response.ok) {
-    return { platform, items: [], expired: false, fetched: false };
+    return { platform, authMode, items: [], expired: false, fetched: false };
   }
 
   const result = await response.json();
   if (result?.status === "session_expired") {
-    return { platform, items: [], expired: true, fetched: false };
+    return { platform, authMode, items: [], expired: true, fetched: false };
   }
   if (result?.status !== "success" || !Array.isArray(result.data)) {
-    return { platform, items: [], expired: false, fetched: false };
+    return { platform, authMode, items: [], expired: false, fetched: false };
   }
 
   const items = result.data.map((item: DeadlineItem) => ({
     ...item,
     platform,
   }));
-  return { platform, items, expired: false, fetched: true };
+  return { platform, authMode, items, expired: false, fetched: true };
 }
 
 export type RefreshResult = {
@@ -138,7 +143,7 @@ export async function refreshUserDeadlinesDetailed(userId: string): Promise<Refr
   const platformFields = sessions.rows.map((row) => {
     let fields: Fields | SessionData = {};
     try {
-      fields = decryptJson<SessionData | Fields>(row.encrypted_session);
+      fields = decryptStoredPlatformDataForUser(row.encrypted_session, userId) as SessionData | Fields;
     } catch {
       fields = {};
     }
@@ -169,7 +174,12 @@ export async function refreshUserDeadlinesDetailed(userId: string): Promise<Refr
   try {
     await client.query("begin");
     for (const result of results) {
-      if (result.expired) {
+      if (result.authMode === "credentials") {
+        await client.query(
+          "update platform_sessions set session_valid = null, session_checked_at = null where user_id = $1 and platform = $2",
+          [userId, result.platform]
+        );
+      } else if (result.expired) {
         await client.query(
           "update platform_sessions set session_valid = false, session_checked_at = now() where user_id = $1 and platform = $2",
           [userId, result.platform]
@@ -191,10 +201,11 @@ export async function refreshUserDeadlinesDetailed(userId: string): Promise<Refr
     }
 
     for (const item of items) {
+      const completed = Boolean(item.completed) || /submitted/i.test(item.status ?? "")
       await client.query(
         `
-        insert into deadlines (user_id, platform, title, course, due_at, status, url)
-        values ($1, $2, $3, $4, to_timestamp($5), $6, $7)
+        insert into deadlines (user_id, platform, title, course, due_at, status, completed, url)
+        values ($1, $2, $3, $4, to_timestamp($5), $6, $7, $8)
         `,
         [
           userId,
@@ -203,6 +214,7 @@ export async function refreshUserDeadlinesDetailed(userId: string): Promise<Refr
           item.course,
           item.due,
           item.status ?? null,
+          completed,
           item.url,
         ]
       );

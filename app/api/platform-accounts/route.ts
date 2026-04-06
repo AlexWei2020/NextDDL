@@ -1,19 +1,31 @@
 import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
 import { pool } from "@/lib/db";
-import { decryptJson, encryptJson } from "@/lib/crypto";
+import {
+  detectStoredAuthMode,
+  encryptCredentialsPayloadForUser,
+  encryptSessionPayload,
+} from "@/lib/credential-vault";
 
 type Fields = Record<string, string>;
+type AuthMode = "session" | "credentials";
 type SaveItem ={
     platform: string;
     identifierField?: string;
     fields: Fields;
+  authMode?: AuthMode;
 }
 
 const PLATFORM_API: Record<string, string> = {
   Hydro: "/api/hydro",
   Gradescope: "/api/gradescope",
   Blackboard: "/api/blackboard",
+};
+
+const PLATFORM_REQUIRED_FIELDS: Record<string, string[]> = {
+  Hydro: ["url", "username", "password"],
+  Gradescope: ["email", "password"],
+  Blackboard: ["studentid", "password"],
 };
 
 function getPythonBaseUrl() {
@@ -41,10 +53,10 @@ export async function GET(){
     )
     const items = result.rows.map((row) => {
         try {
-          decryptJson<Record<string, unknown>>(row.encrypted_session)
-          return { platform: row.platform, configured: true }
+          const authMode = detectStoredAuthMode(row.encrypted_session)
+          return { platform: row.platform, configured: true, authMode }
         } catch (error) {
-          return { platform: row.platform, configured: false }
+          return { platform: row.platform, configured: false, authMode: "session" }
         }
     })
     return NextResponse.json({ items })
@@ -63,46 +75,66 @@ export async function POST(request: Request) {
 
     for (const item of items) {
       const fields = item.fields ?? {}
-      const identifier = item.identifierField ? fields[item.identifierField] : undefined
+      const authMode: AuthMode = item.authMode === "credentials" ? "credentials" : "session"
       const api = PLATFORM_API[item.platform]
+      const requiredFields = PLATFORM_REQUIRED_FIELDS[item.platform] ?? []
       if (!api) {
         throw new Error(`Unsupported platform: ${item.platform}`)
       }
+      if (!requiredFields.every((key) => Boolean(fields[key]))) {
+        throw new Error(`Missing required fields for ${item.platform}`)
+      }
+
       const baseUrl = getPythonBaseUrl()
+      const payload = authMode === "session"
+        ? { ...fields, include_session: true }
+        : { ...fields }
       const response = await fetch(`${baseUrl}${api}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...fields, include_session: true }),
+        body: JSON.stringify(payload),
       })
 
       if (!response.ok) {
-        throw new Error(`Failed to fetch session for ${item.platform}`)
+        throw new Error(`Failed to validate ${item.platform} account`)
       }
       const result = await response.json()
-      if (result?.status !== "success" || !result?.session) {
-        throw new Error(`Failed to fetch session for ${item.platform}`)
+      if (result?.status !== "success") {
+        throw new Error(`Failed to validate ${item.platform} account`)
       }
-      const sessionData = item.platform === "Hydro"
-        ? { cookies: result.session, url: fields.url }
-        : { cookies: result.session }
+
+      let storedData: Record<string, unknown> = {}
+      let sessionValid: boolean | null
+      let sessionCheckedAtSql = "now()"
+
+      if (authMode === "session") {
+        if (!result?.session) {
+          throw new Error(`Failed to fetch session for ${item.platform}`)
+        }
+        storedData = item.platform === "Hydro"
+          ? { authMode, cookies: result.session, url: fields.url }
+          : { authMode, cookies: result.session }
+        sessionValid = true
+      } else {
+        sessionValid = null
+        sessionCheckedAtSql = "null"
+      }
 
       await client.query(
         `delete from platform_sessions where user_id = $1 and platform = $2`,
         [user.id, item.platform]
       )
 
-      if (Object.keys(sessionData).length > 0) {
-        const encrypted = encryptJson(sessionData)
-        await client.query(
-          `
-          insert into platform_sessions (user_id, platform, encrypted_session, expires_at, session_valid, session_checked_at)
-          values ($1, $2, $3, null, true, now())
-          `,
-          [user.id, item.platform, encrypted]
-        )
-      }
-
-      void identifier
+      const encrypted = authMode === "credentials"
+        ? encryptCredentialsPayloadForUser(user.id, fields)
+        : encryptSessionPayload(storedData)
+      await client.query(
+        `
+        insert into platform_sessions (user_id, platform, encrypted_session, expires_at, session_valid, session_checked_at)
+        values ($1, $2, $3, null, $4, ${sessionCheckedAtSql})
+        `,
+        [user.id, item.platform, encrypted, sessionValid]
+      )
     }
 
     await client.query('commit')

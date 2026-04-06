@@ -32,6 +32,8 @@ DATABASE_URL=postgresql://user:pass@localhost:5432/nextddl
 PYTHON_API_BASE_URL=http://127.0.0.1:5000
 SESSION_SECRET=change-me
 PLATFORM_SESSION_SECRET=change-me
+PLATFORM_RSA_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----"
+PLATFORM_RSA_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
 PUBLIC_BASE_URL=http://localhost:3000
 
 NEXT_PUBLIC_CASDOOR_SERVER_URL=https://your-casdoor-server.example.com
@@ -48,6 +50,7 @@ Notes:
 - NEXT_PUBLIC_* are injected at build time.
 - For container networking, use db and api hostnames instead of localhost.
 - Set PUBLIC_BASE_URL to the externally reachable URL (LAN or server domain) to generate correct callback and ICS links.
+- Credentials mode requires PLATFORM_RSA_PUBLIC_KEY and PLATFORM_RSA_PRIVATE_KEY.
 
 ## Local Development
 
@@ -104,6 +107,8 @@ Create a .env file in the project root and set values (examples):
 DATABASE_URL=postgresql://nextddl:nextddl@db:5432/nextddl
 SESSION_SECRET=change-me
 PLATFORM_SESSION_SECRET=change-me
+PLATFORM_RSA_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----"
+PLATFORM_RSA_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
 PUBLIC_BASE_URL=https://your-domain.example.com
 
 NEXT_PUBLIC_CASDOOR_SERVER_URL=https://your-casdoor-server.example.com
