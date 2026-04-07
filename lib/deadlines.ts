@@ -1,6 +1,7 @@
 import "server-only";
 import { pool } from "@/lib/db";
 import { decryptStoredPlatformDataForUser } from "@/lib/credential-vault";
+import { isSubmittedStatus } from "@/lib/deadline-status";
 
 type Fields = Record<string, string>;
 type AuthMode = "session" | "credentials";
@@ -116,6 +117,22 @@ export type RefreshResult = {
   expiredPlatforms: string[];
 };
 
+function getDeadlineKey(item: {
+  platform?: string;
+  title?: string;
+  course?: string;
+  due?: number;
+  url?: string;
+}) {
+  return [
+    item.platform ?? "",
+    item.title ?? "",
+    item.course ?? "",
+    String(item.due ?? ""),
+    item.url ?? "",
+  ].join("|");
+}
+
 export async function refreshUserDeadlinesDetailed(userId: string): Promise<RefreshResult> {
   const retentionResult = await pool.query(
     `select ddl_retention_days from users where id = $1`,
@@ -193,7 +210,28 @@ export async function refreshUserDeadlinesDetailed(userId: string): Promise<Refr
     }
 
     const successfulPlatforms = successfulResults.map((result) => result.platform);
+    const existingCompletedMap = new Map<string, boolean>();
     if (successfulPlatforms.length > 0) {
+      const existingRows = await client.query(
+        `
+        select platform, title, course, extract(epoch from due_at)::bigint as due, url, completed
+        from deadlines
+        where user_id = $1 and platform = any($2::text[])
+        `,
+        [userId, successfulPlatforms]
+      );
+
+      for (const row of existingRows.rows) {
+        const key = getDeadlineKey({
+          platform: row.platform,
+          title: row.title,
+          course: row.course,
+          due: Number(row.due),
+          url: row.url,
+        });
+        existingCompletedMap.set(key, Boolean(row.completed));
+      }
+
       await client.query(
         "delete from deadlines where user_id = $1 and platform = any($2::text[])",
         [userId, successfulPlatforms]
@@ -201,7 +239,10 @@ export async function refreshUserDeadlinesDetailed(userId: string): Promise<Refr
     }
 
     for (const item of items) {
-      const completed = Boolean(item.completed) || (item.status ?? "").trim().toLowerCase() === "submitted"
+      const itemKey = getDeadlineKey(item);
+      const completed = isSubmittedStatus(item.status)
+        ? true
+        : Boolean(item.completed) || Boolean(existingCompletedMap.get(itemKey));
       await client.query(
         `
         insert into deadlines (user_id, platform, title, course, due_at, status, completed, url)

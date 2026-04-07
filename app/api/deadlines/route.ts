@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { getCurrentUser } from '@/lib/auth'
 import { pool } from '@/lib/db'
+import { isSubmittedStatus } from '@/lib/deadline-status'
 
 type DeadlineItem = {
   platform?: string
@@ -29,7 +30,7 @@ export async function GET() {
 
   const items = result.rows.map((row) => {
     const due = Math.floor(new Date(row.due_at).getTime() / 1000)
-    const submitted = typeof row.status === 'string' && row.status.trim().toLowerCase() === 'submitted'
+    const submitted = isSubmittedStatus(row.status)
     const completed = Boolean(row.completed) || submitted
     return {
       id: row.id,
