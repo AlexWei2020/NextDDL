@@ -930,10 +930,10 @@ function DeadlineCard({ item, isPast = false, onViewDetails, onEdit, onToggleCom
         type="button"
         aria-label={isCompleted ? '标记为未完成' : '标记为已完成'}
         onClick={() => onToggleCompleted?.(item, !isCompleted)}
-        className={`absolute left-0 top-0 -translate-x-1/2 h-4 w-4 rounded-full border-2 transition-colors ring-4 ring-white dark:ring-slate-950 ${
+        className={`absolute left-0 top-0 z-10 -translate-x-1/2 h-4 w-4 rounded-full border-2 transition-colors ring-4 ring-white dark:ring-slate-950 ${
           isCompleted
             ? 'border-blue-500 bg-blue-500'
-            : 'border-blue-500 bg-transparent'
+            : 'border-blue-500 bg-white dark:bg-slate-950'
         }`}
       />
 
