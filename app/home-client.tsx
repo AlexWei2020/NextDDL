@@ -926,24 +926,21 @@ function DeadlineCard({ item, isPast = false, onViewDetails, onEdit, onToggleCom
   return (
     <div className={`relative pl-8 pb-4 ${!isPast && 'border-l-2 border-blue-200 dark:border-blue-800'} ${isCompleted ? 'opacity-60' : ''}`}>
       {/* Timeline Dot */}
-      <div className={`absolute left-0 top-0 -translate-x-1/2 w-4 h-4 rounded-full ${
-        isCompleted ? 'bg-green-500' : isOverdue ? 'bg-slate-400' : isPast ? 'bg-slate-300' : 'bg-blue-500'
-      } ring-4 ring-white dark:ring-slate-950`} />
+      <button
+        type="button"
+        aria-label={isCompleted ? '标记为未完成' : '标记为已完成'}
+        onClick={() => onToggleCompleted?.(item, !isCompleted)}
+        className={`absolute left-0 top-0 -translate-x-1/2 h-4 w-4 rounded-full border-2 transition-colors ring-4 ring-white dark:ring-slate-950 ${
+          isCompleted
+            ? 'border-blue-500 bg-blue-500'
+            : 'border-blue-500 bg-transparent'
+        }`}
+      />
 
       {/* Content */}
       <div className="space-y-1">
         <div className="flex items-start justify-between gap-2">
           <div className="flex items-start gap-2 flex-1 min-w-0">
-            <button
-              type="button"
-              aria-label={isCompleted ? '标记为未完成' : '标记为已完成'}
-              onClick={() => onToggleCompleted?.(item, !isCompleted)}
-              className={`mt-1 h-4 w-4 rounded-full border-2 transition-colors ${
-                isCompleted
-                  ? 'border-blue-500 bg-blue-500'
-                  : 'border-blue-500 bg-transparent'
-              }`}
-            />
             <h3 className={`font-semibold text-lg leading-tight break-words ${isCompleted ? 'line-through text-slate-500 dark:text-slate-400' : ''}`}>{item.title}</h3>
           </div>
           {!isPast && (
