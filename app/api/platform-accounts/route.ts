@@ -6,11 +6,7 @@ import {
   encryptCredentialsPayloadForUser,
   encryptSessionPayload,
 } from "@/lib/credential-vault";
-import fetchPlatform, {
-  loginBlackboardSession,
-  loginGradescopeSession,
-  loginHydroSession,
-} from "@/lib/fetch-ddls";
+import fetchPlatform, { loginPlatformSession } from "@/lib/fetch-ddls";
 
 type Fields = Record<string, string>;
 type AuthMode = "session" | "credentials";
@@ -26,38 +22,6 @@ const PLATFORM_REQUIRED_FIELDS: Record<string, string[]> = {
   Gradescope: ["email", "password"],
   Blackboard: ["studentid", "password"],
 };
-
-async function resolveSessionCookies(platform: string, fields: Fields) {
-  if (platform === "Hydro") {
-    const url = fields.url;
-    const username = fields.username;
-    const password = fields.password;
-    if (!url || !username || !password) {
-      throw new Error("Missing required fields for Hydro");
-    }
-    return loginHydroSession(url, username, password);
-  }
-
-  if (platform === "Gradescope") {
-    const email = fields.email;
-    const password = fields.password;
-    if (!email || !password) {
-      throw new Error("Missing required fields for Gradescope");
-    }
-    return loginGradescopeSession(email, password);
-  }
-
-  if (platform === "Blackboard") {
-    const studentId = fields.studentid;
-    const password = fields.password;
-    if (!studentId || !password) {
-      throw new Error("Missing required fields for Blackboard");
-    }
-    return loginBlackboardSession(studentId, password);
-  }
-
-  throw new Error(`Unsupported platform: ${platform}`);
-}
 
 export async function GET(){
     const user = await getCurrentUser();
@@ -77,7 +41,7 @@ export async function GET(){
         try {
           const authMode = detectStoredAuthMode(row.encrypted_session)
           return { platform: row.platform, configured: true, authMode }
-        } catch (error) {
+        } catch {
           return { platform: row.platform, configured: false, authMode: "session" }
         }
     })
@@ -103,20 +67,16 @@ export async function POST(request: Request) {
         throw new Error(`Missing required fields for ${item.platform}`)
       }
 
-      let storedData: Record<string, unknown> = {}
-      let sessionValid: boolean | null
-      let sessionCheckedAtSql = "now()"
+      const session = await loginPlatformSession(item.platform, fields)
+      await fetchPlatform(item.platform, {
+        session: session.cookies,
+        ...(session.url ? { url: session.url } : {}),
+      })
 
-      if (authMode === "session") {
-        const cookies = await resolveSessionCookies(item.platform, fields)
-        storedData = item.platform === "Hydro"
-          ? { authMode, cookies, url: fields.url }
-          : { authMode, cookies }
-        sessionValid = true
-      } else {
-        await fetchPlatform(item.platform, fields)
-        sessionValid = null
-        sessionCheckedAtSql = "null"
+      const storedData: Record<string, unknown> = {
+        authMode,
+        cookies: session.cookies,
+        ...(session.url ? { url: session.url } : {}),
       }
 
       await client.query(
@@ -125,14 +85,17 @@ export async function POST(request: Request) {
       )
 
       const encrypted = authMode === "credentials"
-        ? encryptCredentialsPayloadForUser(user.id, fields)
+        ? encryptCredentialsPayloadForUser(user.id, fields, session)
         : encryptSessionPayload(storedData)
       await client.query(
         `
-        insert into platform_sessions (user_id, platform, encrypted_session, expires_at, session_valid, session_checked_at)
-        values ($1, $2, $3, null, $4, ${sessionCheckedAtSql})
+        insert into platform_sessions (
+          user_id, platform, encrypted_session, expires_at,
+          session_valid, session_checked_at, session_refreshed_at
+        )
+        values ($1, $2, $3, null, true, now(), now())
         `,
-        [user.id, item.platform, encrypted, sessionValid]
+        [user.id, item.platform, encrypted]
       )
     }
 

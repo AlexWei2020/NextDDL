@@ -13,6 +13,18 @@ import { decryptJson, encryptJson } from "@/lib/crypto";
 type AuthMode = "session" | "credentials";
 type Fields = Record<string, string>;
 
+export type StoredPlatformSession = {
+  cookies: Record<string, string>;
+  url?: string;
+};
+
+export type StoredPlatformData = {
+  authMode: AuthMode;
+  credentials?: Fields;
+  cookies?: Record<string, string>;
+  url?: string;
+};
+
 type CredentialEntry = {
   wrappedKey: string;
   iv: string;
@@ -26,6 +38,15 @@ type CredentialEnvelopeV1 = {
   userHashSalt: string;
   credentialsByUserHash: Record<string, CredentialEntry>;
   createdAt: string;
+};
+
+type CredentialEnvelopeV2 = Omit<CredentialEnvelopeV1, "format"> & {
+  format: "rsa-aes-v2";
+};
+
+type StoredCredentialsV2 = {
+  credentials: Fields;
+  session?: StoredPlatformSession;
 };
 
 function normalizePem(raw: string | undefined) {
@@ -53,10 +74,14 @@ function hashUserId(userId: string, saltB64: string) {
   return createHash("sha256").update(`${saltB64}:${userId}`).digest("hex");
 }
 
-function isCredentialEnvelope(value: unknown): value is CredentialEnvelopeV1 {
+function isCredentialEnvelope(value: unknown): value is CredentialEnvelopeV1 | CredentialEnvelopeV2 {
   if (!value || typeof value !== "object") return false;
   const obj = value as Record<string, unknown>;
-  return obj.format === "rsa-aes-v1" && obj.authMode === "credentials";
+  return (obj.format === "rsa-aes-v1" || obj.format === "rsa-aes-v2")
+    && obj.authMode === "credentials"
+    && typeof obj.userHashSalt === "string"
+    && typeof obj.credentialsByUserHash === "object"
+    && obj.credentialsByUserHash !== null;
 }
 
 function isSessionPayload(value: unknown): value is { authMode: "session"; cookies: Record<string, string> } {
@@ -88,13 +113,21 @@ export function encryptSessionPayload(value: unknown) {
   return encryptJson(value);
 }
 
-export function encryptCredentialsPayloadForUser(userId: string, fields: Fields) {
+export function encryptCredentialsPayloadForUser(
+  userId: string,
+  fields: Fields,
+  session?: StoredPlatformSession
+) {
   const publicKey = getPublicKey();
   const aesKey = randomBytes(32);
   const iv = randomBytes(12);
 
   const cipher = createCipheriv("aes-256-gcm", aesKey, iv);
-  const plaintext = Buffer.from(JSON.stringify(fields), "utf8");
+  const storedValue: StoredCredentialsV2 = {
+    credentials: fields,
+    ...(session ? { session } : {}),
+  };
+  const plaintext = Buffer.from(JSON.stringify(storedValue), "utf8");
   const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
   const tag = cipher.getAuthTag();
 
@@ -110,8 +143,8 @@ export function encryptCredentialsPayloadForUser(userId: string, fields: Fields)
   const userHashSalt = randomBytes(16).toString("base64");
   const userHash = hashUserId(userId, userHashSalt);
 
-  const envelope: CredentialEnvelopeV1 = {
-    format: "rsa-aes-v1",
+  const envelope: CredentialEnvelopeV2 = {
+    format: "rsa-aes-v2",
     authMode: "credentials",
     userHashSalt,
     credentialsByUserHash: {
@@ -128,7 +161,7 @@ export function encryptCredentialsPayloadForUser(userId: string, fields: Fields)
   return JSON.stringify(envelope);
 }
 
-export function decryptCredentialsPayloadForUser(payload: string, userId: string): Fields {
+function decryptCredentialEnvelopeValue(payload: string, userId: string) {
   const parsed = JSON.parse(payload) as unknown;
   if (!isCredentialEnvelope(parsed)) {
     throw new Error("Invalid credentials envelope");
@@ -161,19 +194,50 @@ export function decryptCredentialsPayloadForUser(payload: string, userId: string
   if (!value || typeof value !== "object") {
     throw new Error("Invalid decrypted credentials payload");
   }
-  return value as Fields;
+  return { envelope: parsed, value: value as Record<string, unknown> };
 }
 
-export function decryptStoredPlatformDataForUser(payload: string, userId: string): Record<string, unknown> {
+export function decryptCredentialsPayloadForUser(payload: string, userId: string): Fields {
+  const { envelope, value } = decryptCredentialEnvelopeValue(payload, userId);
+  if (envelope.format === "rsa-aes-v1") {
+    return value as Fields;
+  }
+
+  const credentials = value.credentials;
+  if (!credentials || typeof credentials !== "object" || Array.isArray(credentials)) {
+    throw new Error("Invalid credentials payload");
+  }
+  return credentials as Fields;
+}
+
+export function decryptStoredPlatformDataForUser(payload: string, userId: string): StoredPlatformData {
   const mode = detectStoredAuthMode(payload);
   if (mode === "credentials") {
-    const fields = decryptCredentialsPayloadForUser(payload, userId);
-    return { authMode: "credentials", ...fields };
+    const { envelope, value } = decryptCredentialEnvelopeValue(payload, userId);
+    if (envelope.format === "rsa-aes-v1") {
+      return { authMode: "credentials", credentials: value as Fields };
+    }
+
+    const credentials = value.credentials;
+    if (!credentials || typeof credentials !== "object" || Array.isArray(credentials)) {
+      throw new Error("Invalid credentials payload");
+    }
+    const session = value.session;
+    if (session && (typeof session !== "object" || Array.isArray(session))) {
+      throw new Error("Invalid stored session payload");
+    }
+    const storedSession = session as StoredPlatformSession | undefined;
+    return {
+      authMode: "credentials",
+      credentials: credentials as Fields,
+      ...(storedSession?.cookies ? { cookies: storedSession.cookies } : {}),
+      ...(storedSession?.url ? { url: storedSession.url } : {}),
+    };
   }
 
   const parsed = decryptJson<unknown>(payload);
   if (!isSessionPayload(parsed)) {
     throw new Error("Invalid session payload format. Reconfiguration required.");
   }
-  return parsed as Record<string, unknown>;
+  return parsed as StoredPlatformData;
 }

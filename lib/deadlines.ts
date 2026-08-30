@@ -1,16 +1,18 @@
 import "server-only";
 import { pool } from "@/lib/db";
-import { decryptStoredPlatformDataForUser } from "@/lib/credential-vault";
+import {
+  decryptStoredPlatformDataForUser,
+  encryptCredentialsPayloadForUser,
+  StoredPlatformData,
+} from "@/lib/credential-vault";
 import { isSubmittedStatus } from "@/lib/deadline-status";
-import fetchPlatform from "@/lib/fetch-ddls";
+import fetchPlatform, {
+  isPlatformSessionExpiredError,
+  loginPlatformSession,
+} from "@/lib/fetch-ddls";
 
-type Fields = Record<string, string>;
 type AuthMode = "session" | "credentials";
-type SessionData = {
-  authMode?: AuthMode;
-  cookies?: Record<string, string>;
-  url?: string;
-} & Record<string, unknown>;
+const SESSION_REFRESH_RETRY_COOLDOWN_MS = 15 * 60 * 1000;
 
 type PlatformFetchResult = {
   platform: string;
@@ -18,6 +20,7 @@ type PlatformFetchResult = {
   items: DeadlineItem[];
   expired: boolean;
   fetched: boolean;
+  sessionRefreshed: boolean;
 };
 
 export type DeadlineItem = {
@@ -30,49 +33,172 @@ export type DeadlineItem = {
   completed?: boolean;
 };
 
-const PLATFORM_REQUIRED_FIELDS: Record<string, string[]> = {
-  Hydro: ["url", "username", "password"],
-  Gradescope: ["email", "password"],
-  Blackboard: ["studentid", "password"],
-};
-
-function hasRequiredFields(fields: Fields, required: string[]) {
-  return required.every((key) => Boolean(fields[key]));
+function toSessionPayload(data: Pick<StoredPlatformData, "cookies" | "url">) {
+  return {
+    session: data.cookies,
+    ...(data.url ? { url: data.url } : {}),
+  };
 }
 
-async function fetchPlatformDeadlines(platform: string, fields: Fields | SessionData): Promise<PlatformFetchResult> {
-  const required = PLATFORM_REQUIRED_FIELDS[platform] || [];
-  const authMode: AuthMode = (fields as SessionData).authMode === "credentials" ? "credentials" : "session";
-
-  let payload: Record<string, unknown> = {};
-  if ((fields as SessionData).cookies) {
-    payload = { session: (fields as SessionData).cookies };
-    if (platform === "Hydro") {
-      const url = (fields as SessionData).url;
-      if (!url) {
-        return { platform, authMode, items: [], expired: false, fetched: false };
-      }
-      payload.url = url;
-    }
-  } else {
-    if (!hasRequiredFields(fields as Fields, required)) {
-      return { platform, authMode, items: [], expired: false, fetched: false };
-    }
-    payload = fields as Fields;
-  }
-
+async function fetchPlatformDeadlines(
+  userId: string,
+  platform: string
+): Promise<PlatformFetchResult> {
+  const client = await pool.connect();
   try {
-    const items = await fetchPlatform(platform, payload);
-    return { platform, authMode, items, expired: false, fetched: true };
-  } catch {
-    const expired = authMode === "session";
-    return { platform, authMode, items: [], expired, fetched: false };
+    await client.query("begin");
+    const rowResult = await client.query(
+      `
+      select id, encrypted_session, session_valid, session_checked_at
+      from platform_sessions
+      where user_id = $1 and platform = $2
+      order by created_at desc
+      limit 1
+      for update
+      `,
+      [userId, platform]
+    );
+
+    if (rowResult.rows.length === 0) {
+      await client.query("commit");
+      return {
+        platform,
+        authMode: "session",
+        items: [],
+        expired: false,
+        fetched: false,
+        sessionRefreshed: false,
+      };
+    }
+
+    const row = rowResult.rows[0];
+    const stored = decryptStoredPlatformDataForUser(row.encrypted_session, userId);
+    const authMode = stored.authMode;
+    const lastCheckedAt = row.session_checked_at
+      ? new Date(row.session_checked_at).getTime()
+      : 0;
+    const refreshRetryCoolingDown = row.session_valid === false
+      && Number.isFinite(lastCheckedAt)
+      && Date.now() - lastCheckedAt < SESSION_REFRESH_RETRY_COOLDOWN_MS;
+
+    if (refreshRetryCoolingDown) {
+      await client.query("commit");
+      return {
+        platform,
+        authMode,
+        items: [],
+        expired: true,
+        fetched: false,
+        sessionRefreshed: false,
+      };
+    }
+
+    if (stored.cookies && row.session_valid !== false) {
+      try {
+        const items = await fetchPlatform(platform, toSessionPayload(stored));
+        await client.query(
+          `update platform_sessions
+           set session_valid = true, session_checked_at = now()
+           where id = $1`,
+          [row.id]
+        );
+        await client.query("commit");
+        return {
+          platform,
+          authMode,
+          items,
+          expired: false,
+          fetched: true,
+          sessionRefreshed: false,
+        };
+      } catch (error) {
+        if (!isPlatformSessionExpiredError(error)) {
+          await client.query("commit");
+          return {
+            platform,
+            authMode,
+            items: [],
+            expired: false,
+            fetched: false,
+            sessionRefreshed: false,
+          };
+        }
+      }
+    }
+
+    if (authMode !== "credentials" || !stored.credentials) {
+      await client.query(
+        `update platform_sessions
+         set session_valid = false, session_checked_at = now()
+         where id = $1`,
+        [row.id]
+      );
+      await client.query("commit");
+      return {
+        platform,
+        authMode,
+        items: [],
+        expired: true,
+        fetched: false,
+        sessionRefreshed: false,
+      };
+    }
+
+    try {
+      const session = await loginPlatformSession(platform, stored.credentials);
+      const items = await fetchPlatform(platform, toSessionPayload(session));
+      const encrypted = encryptCredentialsPayloadForUser(
+        userId,
+        stored.credentials,
+        session
+      );
+      await client.query(
+        `update platform_sessions
+         set encrypted_session = $1,
+             session_valid = true,
+             session_checked_at = now(),
+             session_refreshed_at = now()
+         where id = $2`,
+        [encrypted, row.id]
+      );
+      await client.query("commit");
+      return {
+        platform,
+        authMode,
+        items,
+        expired: false,
+        fetched: true,
+        sessionRefreshed: true,
+      };
+    } catch {
+      await client.query(
+        `update platform_sessions
+         set session_valid = false, session_checked_at = now()
+         where id = $1`,
+        [row.id]
+      );
+      await client.query("commit");
+      return {
+        platform,
+        authMode,
+        items: [],
+        expired: true,
+        fetched: false,
+        sessionRefreshed: false,
+      };
+    }
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally {
+    client.release();
   }
 }
 
 export type RefreshResult = {
   items: DeadlineItem[];
   expiredPlatforms: string[];
+  refreshedPlatforms: string[];
 };
 
 function getDeadlineKey(item: {
@@ -103,34 +229,28 @@ export async function refreshUserDeadlinesDetailed(userId: string): Promise<Refr
 
   const sessions = await pool.query(
     `
-    select distinct on (platform) platform, encrypted_session
+    select distinct platform
     from platform_sessions
     where user_id = $1
-    order by platform, created_at desc
+    order by platform
     `,
     [userId]
   );
 
   if (sessions.rows.length === 0) {
-    return { items: [], expiredPlatforms: [] };
+    return { items: [], expiredPlatforms: [], refreshedPlatforms: [] };
   }
 
-  const platformFields = sessions.rows.map((row) => {
-    let fields: Fields | SessionData = {};
-    try {
-      fields = decryptStoredPlatformDataForUser(row.encrypted_session, userId) as SessionData | Fields;
-    } catch {
-      fields = {};
-    }
-    return { platform: row.platform as string, fields };
-  });
-
   const results = await Promise.all(
-    platformFields.map(({ platform, fields }) => fetchPlatformDeadlines(platform, fields))
+    sessions.rows.map((row) => fetchPlatformDeadlines(userId, row.platform as string))
   );
 
   const expiredPlatforms = results
     .filter((result) => result.expired)
+    .map((result) => result.platform);
+
+  const refreshedPlatforms = results
+    .filter((result) => result.sessionRefreshed)
     .map((result) => result.platform);
 
   const successfulResults = results.filter((result) => result.fetched);
@@ -148,25 +268,6 @@ export async function refreshUserDeadlinesDetailed(userId: string): Promise<Refr
   const client = await pool.connect();
   try {
     await client.query("begin");
-    for (const result of results) {
-      if (result.authMode === "credentials") {
-        await client.query(
-          "update platform_sessions set session_valid = null, session_checked_at = null where user_id = $1 and platform = $2",
-          [userId, result.platform]
-        );
-      } else if (result.expired) {
-        await client.query(
-          "update platform_sessions set session_valid = false, session_checked_at = now() where user_id = $1 and platform = $2",
-          [userId, result.platform]
-        );
-      } else if (result.fetched) {
-        await client.query(
-          "update platform_sessions set session_valid = true, session_checked_at = now() where user_id = $1 and platform = $2",
-          [userId, result.platform]
-        );
-      }
-    }
-
     const successfulPlatforms = successfulResults.map((result) => result.platform);
     const existingCompletedMap = new Map<string, boolean>();
     if (successfulPlatforms.length > 0) {
@@ -227,7 +328,7 @@ export async function refreshUserDeadlinesDetailed(userId: string): Promise<Refr
     client.release();
   }
 
-  return { items, expiredPlatforms };
+  return { items, expiredPlatforms, refreshedPlatforms };
 }
 
 export async function refreshUserDeadlines(userId: string): Promise<DeadlineItem[]> {

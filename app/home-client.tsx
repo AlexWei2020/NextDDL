@@ -9,7 +9,6 @@ import { Label } from '@/components/ui/label'
 import { toast } from 'sonner'
 import { Toaster } from '@/components/ui/sonner'
 import { ChevronDown, ChevronUp, Loader2 } from 'lucide-react'
-import Cookies from 'js-cookie'
 import { useRouter } from 'next/navigation'
 
 // Types and constants
@@ -76,6 +75,40 @@ interface HomeClientProps {
 }
 
 type AccountStatus = 'session_valid' | 'session_expired' | 'credentials_configured' | 'not_configured' | 'unknown'
+type AuthMode = 'session' | 'credentials'
+type AccountState = {
+  status: AccountStatus
+  authMode: AuthMode
+  refreshedAt: string | null
+}
+
+function toAccountStateMap(items: Array<Record<string, unknown>>) {
+  const states: Record<string, AccountState> = {}
+  for (const item of items) {
+    if (typeof item.platform !== 'string') continue
+    states[item.platform] = {
+      status: (item.accountStatus as AccountStatus) ?? 'unknown',
+      authMode: item.authMode === 'credentials' ? 'credentials' : 'session',
+      refreshedAt: typeof item.refreshedAt === 'string' ? item.refreshedAt : null,
+    }
+  }
+  return states
+}
+
+function formatRelativeTime(value: string | null) {
+  if (!value) return null
+  const timestamp = Date.parse(value)
+  if (!Number.isFinite(timestamp)) return null
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000))
+  if (elapsedSeconds < 60) return '刚刚'
+  const minutes = Math.floor(elapsedSeconds / 60)
+  if (minutes < 60) return `${minutes} 分钟前`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours} 小时前`
+  const days = Math.floor(hours / 24)
+  if (days < 30) return `${days} 天前`
+  return `${Math.floor(days / 30)} 个月前`
+}
 
 export default function HomeClient({ user }: HomeClientProps) {
   const router = useRouter()
@@ -88,7 +121,7 @@ export default function HomeClient({ user }: HomeClientProps) {
   const [showAddManual, setShowAddManual] = useState(false)
   const [manualSaving, setManualSaving] = useState(false)
   const [showIcsOptions, setShowIcsOptions] = useState(false)
-  const [accountStatus, setAccountStatus] = useState<Record<string, AccountStatus>>({})
+  const [accountStatus, setAccountStatus] = useState<Record<string, AccountState>>({})
   const [manualForm, setManualForm] = useState({
     title: '',
     course: '',
@@ -120,11 +153,7 @@ export default function HomeClient({ user }: HomeClientProps) {
         }
         if (statusRes.ok) {
           const statusData = await statusRes.json()
-          const nextStatus: Record<string, AccountStatus> = {}
-          for (const item of statusData.items ?? []) {
-            nextStatus[item.platform] = item.accountStatus ?? 'unknown'
-          }
-          setAccountStatus(nextStatus)
+          setAccountStatus(toAccountStateMap(statusData.items ?? []))
         }
       } catch (error) {
         console.error(error)
@@ -141,7 +170,7 @@ export default function HomeClient({ user }: HomeClientProps) {
       if (!res.ok) {
         throw new Error('Refresh failed')
       }
-      await res.json()
+      const refreshResult = await res.json()
       const deadlinesRes = await fetch('/api/deadlines')
       if (deadlinesRes.ok) {
         const deadlines = await deadlinesRes.json()
@@ -150,13 +179,21 @@ export default function HomeClient({ user }: HomeClientProps) {
       const statusRes = await fetch('/api/platform-session-status')
       if (statusRes.ok) {
         const statusData = await statusRes.json()
-        const nextStatus: Record<string, AccountStatus> = {}
-        for (const item of statusData.items ?? []) {
-          nextStatus[item.platform] = item.accountStatus ?? 'unknown'
-        }
-        setAccountStatus(nextStatus)
+        setAccountStatus(toAccountStateMap(statusData.items ?? []))
       }
-      toast.success('DDL已刷新')
+      const refreshedPlatforms = Array.isArray(refreshResult.refreshedPlatforms)
+        ? refreshResult.refreshedPlatforms.filter((item: unknown): item is string => typeof item === 'string')
+        : []
+      const expiredPlatforms = Array.isArray(refreshResult.expiredPlatforms)
+        ? refreshResult.expiredPlatforms.filter((item: unknown): item is string => typeof item === 'string')
+        : []
+      if (expiredPlatforms.length > 0) {
+        toast.error(`${expiredPlatforms.join('、')} Session 已过期或自动续期失败`)
+      } else {
+        toast.success(refreshedPlatforms.length > 0
+          ? `DDL 已刷新，${refreshedPlatforms.join('、')} Session 已自动续期`
+          : 'DDL 已刷新')
+      }
     } catch (error) {
       console.error(error)
       toast.error('重新获取DDL失败')
@@ -698,32 +735,40 @@ export default function HomeClient({ user }: HomeClientProps) {
               <Card>
                 <CardHeader>
                     <CardTitle>账号状态</CardTitle>
-                    <CardDescription>若配置Session 其状态仅在重新获取DDL时检测</CardDescription>
+                    <CardDescription>获取 DDL 时检测 Session，仅在过期后自动续期</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-3 text-sm">
                   {APIList.map((platform) => {
-                      const status = accountStatus[platform.name] ?? 'not_configured'
+                      const state = accountStatus[platform.name] ?? {
+                        status: 'not_configured' as const,
+                        authMode: 'session' as const,
+                        refreshedAt: null,
+                      }
+                      const status = state.status
+                      const refreshedAgo = formatRelativeTime(state.refreshedAt)
                       const dotClass = status === 'session_valid' || status === 'credentials_configured'
                         ? 'bg-green-500'
                         : status === 'session_expired'
                           ? 'bg-red-500'
                           : 'bg-slate-300'
                       const text = status === 'session_valid'
-                        ? 'Session 有效'
+                        ? `Session 有效${refreshedAgo ? ` · 刷新于 ${refreshedAgo}` : ''}`
                         : status === 'session_expired'
-                          ? 'Session 过期，需重新配置'
+                          ? state.authMode === 'credentials'
+                            ? `Session 过期，自动续期失败${refreshedAgo ? ` · 上次刷新于 ${refreshedAgo}` : ''}`
+                            : 'Session 过期，需重新配置'
                           : status === 'credentials_configured'
-                            ? '已配置账号密码'
+                            ? '账号密码已配置，待建立 Session'
                             : status === 'not_configured'
                               ? '未配置'
                               : '未知'
                     return (
-                      <div key={platform.name} className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
+                      <div key={platform.name} className="flex items-start justify-between gap-4">
+                        <div className="flex shrink-0 items-center gap-2">
                           <span className={`h-2 w-2 rounded-full ${dotClass}`} />
                           <span>{platform.name}</span>
                         </div>
-                        <span className="text-slate-600 dark:text-slate-400">{text}</span>
+                        <span className="min-w-0 break-words text-right text-slate-600 dark:text-slate-400">{text}</span>
                       </div>
                     )
                   })}
@@ -910,7 +955,7 @@ interface DeadlineCardProps {
 }
 
 function DeadlineCard({ item, isPast = false, onViewDetails, onEdit, onToggleCompleted }: DeadlineCardProps) {
-  const now = Date.now()
+  const [now] = useState(() => Date.now())
   const dueDate = new Date(Number(item.due) * 1000)
   const isOverdue = item.due < now / 1000
   const isCompleted = Boolean(item.completed)
