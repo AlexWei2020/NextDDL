@@ -14,6 +14,7 @@ export async function GET() {
       ok: true,
       count: result.items.length,
       expiredPlatforms: result.expiredPlatforms,
+      refreshedPlatforms: result.refreshedPlatforms,
     });
   } catch (error) {
     console.error(error);

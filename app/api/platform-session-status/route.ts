@@ -11,7 +11,8 @@ export async function GET() {
 
   const result = await pool.query(
     `
-    select distinct on (platform) platform, encrypted_session, session_valid, session_checked_at
+    select distinct on (platform)
+      platform, encrypted_session, session_valid, session_checked_at, session_refreshed_at
     from platform_sessions
     where user_id = $1
     order by platform, created_at desc
@@ -30,12 +31,12 @@ export async function GET() {
     }
 
     let accountStatus: "session_valid" | "session_expired" | "credentials_configured" | "not_configured" = "not_configured";
-    if (configured && authMode === "credentials") {
-      accountStatus = "credentials_configured";
-    } else if (configured && row.session_valid === true) {
+    if (configured && row.session_valid === true) {
       accountStatus = "session_valid";
     } else if (configured && row.session_valid === false) {
       accountStatus = "session_expired";
+    } else if (configured && authMode === "credentials") {
+      accountStatus = "credentials_configured";
     }
 
     return {
@@ -45,6 +46,7 @@ export async function GET() {
       sessionValid: row.session_valid,
       accountStatus,
       checkedAt: row.session_checked_at,
+      refreshedAt: row.session_refreshed_at,
     };
   });
 

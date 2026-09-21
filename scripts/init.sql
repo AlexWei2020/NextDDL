@@ -31,9 +31,13 @@ CREATE TABLE IF NOT EXISTS public.platform_sessions (
   created_at timestamp with time zone DEFAULT now(),
   session_valid boolean,
   session_checked_at timestamp without time zone,
+  session_refreshed_at timestamp with time zone,
   CONSTRAINT platform_sessions_pkey PRIMARY KEY (id),
   CONSTRAINT platform_sessions_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id)
 );
+
+ALTER TABLE public.platform_sessions
+  ADD COLUMN IF NOT EXISTS session_refreshed_at timestamp with time zone;
 
 CREATE TABLE IF NOT EXISTS public.deadlines (
   id uuid NOT NULL DEFAULT gen_random_uuid(),

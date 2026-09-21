@@ -52,7 +52,7 @@ interface SettingsClientProps {
 
 type AuthMode = 'session' | 'credentials'
 
-export default function SettingsClient({ user }: SettingsClientProps) {
+export default function SettingsClient({}: SettingsClientProps) {
   const router = useRouter()
   const casdoorServerUrl = process.env.NEXT_PUBLIC_CASDOOR_SERVER_URL
   const casdoorAccountUrl = casdoorServerUrl
@@ -393,7 +393,7 @@ export default function SettingsClient({ user }: SettingsClientProps) {
                   <p className="text-xs text-slate-500 dark:text-slate-400">
                     {editingAuthMode === 'session'
                       ? '仅加密保存会话，过期后需重新配置。'
-                      : '将加密保存账号密码，确保稳定获取DDL。'}
+                      : '加密保存账号密码和 Session；仅在 Session 过期后自动重新登录。'}
                   </p>
                 </div>
                 {platform.fields.map((field) => (

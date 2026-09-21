@@ -1,7 +1,23 @@
 import "server-only";
 import crypto from "crypto";
 
-type CookieMap = Record<string, string>;
+export type CookieMap = Record<string, string>;
+
+export type PlatformSessionData = {
+  cookies: CookieMap;
+  url?: string;
+};
+
+export class PlatformSessionExpiredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PlatformSessionExpiredError";
+  }
+}
+
+export function isPlatformSessionExpiredError(error: unknown) {
+  return error instanceof PlatformSessionExpiredError;
+}
 
 export type FetchDdlFields = Record<string, unknown> & {
   account?: string;
@@ -361,73 +377,57 @@ export async function fetchHydro(fields: FetchDdlFields): Promise<DeadlineItem[]
   const password = String(fields.password || "");
 
   const session = fields.session as CookieMap | undefined;
-
-  if (!session) {
-    const cookies = await loginHydroSession(base, username, password);
-
-    const hwResp = await fetchWithCookies(
-      `${base}/homework`,
-      { headers: { Accept: "application/json" } },
-      cookies
-    );
-    if (!hwResp.ok) throw new Error("Hydro: failed to fetch homework");
-    const payload = await hwResp.json();
-    const arr = Array.isArray(payload) ? payload : payload.calendar ?? payload.tdocs ?? [];
-
-    return (arr as any[]).map((item) => {
-      const endAt = item.endAt || item.dueAt || item.due || null;
-      const due = endAt ? Math.floor(new Date(String(endAt)).getTime() / 1000) : 0;
-      const assign = Array.isArray(item.assign) ? item.assign : [];
-      const course = assign[0] || item.domainName || item.domainId || "Hydro";
-      const title = item.title || item.docTitle || item._id || "Untitled";
-      let url = item.url || null;
-      if (typeof url === "string" && url && !url.startsWith("http")) {
-        const baseUrl = new URL(base);
-        if (url.startsWith("/")) {
-          url = `${baseUrl.origin}${url}`;
-        } else {
-          url = `${base.replace(/\/$/, "")}/${url}`;
-        }
-      }
-      return {
-        platform: "Hydro",
-        title,
-        course,
-        due,
-        status: item.status || "Live",
-        url,
-      } as DeadlineItem;
-    });
-  } else {
-    const resp = await fetchWithCookies(`${base}/homework`, { headers: { Accept: "application/json" } }, session);
-    if (!resp.ok) throw new Error("Hydro: failed to fetch homework with session");
-    const payload = await resp.json();
-    const arr = Array.isArray(payload) ? payload : payload.calendar ?? payload.tdocs ?? [];
-    return (arr as any[]).map((item) => {
-      const endAt = item.endAt || item.dueAt || item.due || null;
-      const due = endAt ? Math.floor(new Date(String(endAt)).getTime() / 1000) : 0;
-      const assign = Array.isArray(item.assign) ? item.assign : [];
-      const course = assign[0] || item.domainName || item.domainId || "Hydro";
-      const title = item.title || item.docTitle || item._id || "Untitled";
-      let url = item.url || null;
-      if (typeof url === "string" && url && !url.startsWith("http")) {
-        const baseUrl = new URL(base);
-        if (url.startsWith("/")) {
-          url = `${baseUrl.origin}${url}`;
-        } else {
-          url = `${base.replace(/\/$/, "")}/${url}`;
-        }
-      }
-      return {
-        platform: "Hydro",
-        title,
-        course,
-        due,
-        status: item.status || "Live",
-        url,
-      } as DeadlineItem;
-    });
+  const effectiveSession = session ?? await loginHydroSession(base, username, password);
+  const resp = await fetchWithCookies(
+    `${base}/homework`,
+    { headers: { Accept: "application/json" } },
+    effectiveSession
+  );
+  if (session && (resp.status === 401 || resp.status === 403 || /\/login(?:[/?#]|$)/i.test(resp.url))) {
+    throw new PlatformSessionExpiredError("Hydro: session expired");
   }
+  if (!resp.ok) throw new Error("Hydro: failed to fetch homework");
+
+  let payload: unknown;
+  try {
+    payload = await resp.json();
+  } catch (error) {
+    if (session && resp.headers.get("content-type")?.includes("text/html")) {
+      throw new PlatformSessionExpiredError("Hydro: session expired");
+    }
+    throw error;
+  }
+  const payloadRecord = payload && typeof payload === "object"
+    ? payload as Record<string, unknown>
+    : undefined;
+  const rawItems = Array.isArray(payload)
+    ? payload
+    : payloadRecord?.calendar ?? payloadRecord?.tdocs ?? [];
+  const items = Array.isArray(rawItems)
+    ? rawItems.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
+    : [];
+  return items.map((item) => {
+    const endAt = item.endAt || item.dueAt || item.due || null;
+    const due = endAt ? Math.floor(new Date(String(endAt)).getTime() / 1000) : 0;
+    const assign = Array.isArray(item.assign) ? item.assign : [];
+    const course = getString(assign[0] || item.domainName || item.domainId) || "Hydro";
+    const title = getString(item.title || item.docTitle || item._id) || "Untitled";
+    let url: string | null = getString(item.url) || null;
+    if (typeof url === "string" && url && !url.startsWith("http")) {
+      const baseUrl = new URL(base);
+      url = url.startsWith("/")
+        ? `${baseUrl.origin}${url}`
+        : `${base.replace(/\/$/, "")}/${url}`;
+    }
+    return {
+      platform: "Hydro",
+      title,
+      course,
+      due,
+      status: getString(item.status) || "Live",
+      url,
+    } as DeadlineItem;
+  });
 }
 
 // Gradescope: supports { email, password } or { session: CookieMap }
@@ -515,6 +515,9 @@ export async function fetchGradescope(fields: FetchDdlFields): Promise<DeadlineI
   }
 
   if (!accessToken) {
+    if (session) {
+      throw new PlatformSessionExpiredError("Gradescope: session expired");
+    }
     throw new Error("Gradescope: missing access token");
   }
 
@@ -531,6 +534,9 @@ export async function fetchGradescope(fields: FetchDdlFields): Promise<DeadlineI
   const fetchJson = async (path: string): Promise<unknown> => {
     const response = await fetch(`${base}${path}`, { headers: requestHeaders });
     if (!response.ok) {
+      if (session && (response.status === 401 || response.status === 403)) {
+        throw new PlatformSessionExpiredError("Gradescope: session expired");
+      }
       throw new Error(`Gradescope: request failed (${response.status}) for ${path}`);
     }
     return response.json();
@@ -605,10 +611,25 @@ export async function fetchBlackboard(fields: FetchDdlFields): Promise<DeadlineI
       console.warn("[Blackboard] Calendar API returned 500, returning empty list");
       return [];
     }
+    if (session && (resp.status === 401 || resp.status === 403)) {
+      throw new PlatformSessionExpiredError("Blackboard: session expired");
+    }
     throw new Error("Blackboard: failed to fetch calendar");
   }
 
-  const data = await resp.json();
+  if (session && /(?:authserver|\/login|bb-sso)/i.test(resp.url)) {
+    throw new PlatformSessionExpiredError("Blackboard: session expired");
+  }
+
+  let data: unknown;
+  try {
+    data = await resp.json();
+  } catch (error) {
+    if (session && resp.headers.get("content-type")?.includes("text/html")) {
+      throw new PlatformSessionExpiredError("Blackboard: session expired");
+    }
+    throw error;
+  }
   if (!Array.isArray(data)) return [];
 
   const parseBlackboardEnd = (value: unknown): number => {
@@ -620,14 +641,49 @@ export async function fetchBlackboard(fields: FetchDdlFields): Promise<DeadlineI
     return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
   };
 
-  return data.map((item: any) => ({
-    platform: "Blackboard",
-    title: item.title || "",
-    course: item.calendarName || "",
-    due: parseBlackboardEnd(item.end),
-    status: item.attemptable ? "Attemptable" : "Unattemptable",
-    url: item.itemSourceId ? `${base}/webapps/calendar/launch/attempt/_blackboard.platform.gradebook2.GradableItem-${item.itemSourceId}` : null,
-  } as DeadlineItem));
+  return data
+    .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
+    .map((item) => ({
+      platform: "Blackboard",
+      title: getString(item.title),
+      course: getString(item.calendarName),
+      due: parseBlackboardEnd(item.end),
+      status: item.attemptable ? "Attemptable" : "Unattemptable",
+      url: item.itemSourceId
+        ? `${base}/webapps/calendar/launch/attempt/_blackboard.platform.gradebook2.GradableItem-${getString(item.itemSourceId)}`
+        : null,
+    } as DeadlineItem));
+}
+
+export async function loginPlatformSession(
+  platform: string,
+  fields: Record<string, string>
+): Promise<PlatformSessionData> {
+  if (platform === "Hydro") {
+    const { url, username, password } = fields;
+    if (!url || !username || !password) {
+      throw new Error("Missing required fields for Hydro");
+    }
+    return { cookies: await loginHydroSession(url, username, password), url };
+  }
+
+  if (platform === "Gradescope") {
+    const { email, password } = fields;
+    if (!email || !password) {
+      throw new Error("Missing required fields for Gradescope");
+    }
+    return { cookies: await loginGradescopeSession(email, password) };
+  }
+
+  if (platform === "Blackboard") {
+    const { studentid, password } = fields;
+    if (!studentid || !password) {
+      throw new Error("Missing required fields for Blackboard");
+    }
+    return { cookies: await loginBlackboardSession(studentid, password) };
+  }
+
+  throw new Error(`Unsupported platform: ${platform}`);
 }
 
 export async function fetchPlatform(platform: string, fields: Record<string, unknown>): Promise<DeadlineItem[]> {
